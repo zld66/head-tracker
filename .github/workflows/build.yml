@@ -26,11 +26,11 @@ jobs:
     
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name "head-tracker" --add-data "haarcascade_frontalface_default.xml;." face_detector.py
+        pyinstaller --onefile --windowed --name "screen-tracker" --add-data "haarcascade_frontalface_default.xml;." face_detector.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: head-tracker
-        path: dist/head-tracker.exe
+        name: screen-tracker
+        path: dist/screen-tracker.exe
         if-no-files-found: error
