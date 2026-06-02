@@ -1,5 +1,5 @@
 """
-人头追踪工具 v5.0
+人头追踪工具 v5.1 - 修复打包问题
 """
 import cv2
 import pyautogui
@@ -7,9 +7,34 @@ import numpy as np
 from PIL import ImageGrab
 import json
 import os
+import sys
+import urllib.request
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.01
+
+# 自动下载 Haar 级联文件
+def get_cascade_path():
+    # 尝试从 OpenCV 路径获取
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    if os.path.exists(cascade_path):
+        return cascade_path
+    
+    # 如果是打包后的 exe，下载到临时目录
+    local_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), 'haarcascade_frontalface_default.xml')
+    
+    if not os.path.exists(local_path):
+        print("首次运行，正在下载人脸检测模型...")
+        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        try:
+            urllib.request.urlretrieve(url, local_path)
+            print("下载完成！")
+        except Exception as e:
+            print(f"下载失败: {e}")
+            print("将使用人体检测模式")
+            return None
+    
+    return local_path
 
 COLOR_RANGES = {
     'red': {'name': '红色', 'ranges': [{'lower': np.array([0,100,100]), 'upper': np.array([10,255,255])}, {'lower': np.array([156,100,100]), 'upper': np.array([180,255,255])}], 'display': (0,0,255)},
@@ -21,7 +46,7 @@ class KeyConfig:
     DEFAULT_KEYS = {'quit': 'q', 'mouse_toggle': 'm', 'color_cycle': 'c', 'mode_cycle': 'd'}
     def __init__(self):
         self.keys = self.DEFAULT_KEYS.copy()
-        self.config_file = 'key_config.json'
+        self.config_file = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), 'key_config.json')
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -35,7 +60,11 @@ class KeyConfig:
 
 class App:
     def __init__(self):
-        self.face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.face = None
+        cascade_path = get_cascade_path()
+        if cascade_path and os.path.exists(cascade_path):
+            self.face = cv2.CascadeClassifier(cascade_path)
+        
         self.hog = cv2.HOGDescriptor()
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
         self.kc = KeyConfig()
@@ -72,8 +101,6 @@ class App:
         elif k == self.kc.get_code('mouse_toggle'): self.mouse_on = not self.mouse_on; print(f"鼠标:{'开' if self.mouse_on else '关'}")
         elif k == self.kc.get_code('color_cycle'):
             cs = [None,'red','yellow','purple']
-            self.color = cs[(cs.index(self.color) if self.color in cs else 0)+1 if self.color in cs else 0] if self.color else 'red'
-            if self.color not in cs: self.color = None
             idx = cs.index(self.color) if self.color in cs else 0
             self.color = cs[(idx+1)%4]
             print(f"颜色:{COLOR_RANGES[self.color]['name'] if self.color else '关'}")
@@ -89,6 +116,7 @@ class App:
         if not cap.isOpened(): print("无法打开摄像头"); return
         cap.set(3, 640); cap.set(4, 480)
         print(f"\n摄像头已启动 | Q=退出 M=鼠标 C=颜色 D=模式")
+        
         while self.running:
             ret, f = cap.read()
             if not ret: continue
@@ -96,12 +124,16 @@ class App:
             gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
             fh, fw = f.shape[:2]
             targets = []
-            if self.mode in ['face','both']:
+            
+            # 人脸检测
+            if self.face is not None and self.mode in ['face','both']:
                 for x,y,w,h in self.face.detectMultiScale(gray, 1.1, 5, minSize=(30,30)):
                     cv2.rectangle(f, (x,y), (x+w,y+h), (0,255,0), 2)
                     cx, cy = x+w//2, y+h//2
                     cv2.circle(f, (cx,cy), 5, (0,255,0), -1)
                     targets.append((cx,cy))
+            
+            # 人体检测
             if self.mode in ['body','both'] and not targets:
                 for x,y,w,h in self.detect_bodies(f):
                     if w<50 or h<100: continue
@@ -109,6 +141,8 @@ class App:
                     hx, hy = x+w//2, y+h//6
                     cv2.circle(f, (hx,hy), 8, (255,0,0), -1)
                     targets.append((hx,hy))
+            
+            # 颜色检测
             if self.color and not targets:
                 for c in self.detect_colors(f):
                     M = cv2.moments(c)
@@ -116,29 +150,40 @@ class App:
                         cx, cy = int(M['m10']/M['m00']), int(M['m01']/M['m00'])
                         cv2.circle(f, (cx,cy), 10, (255,255,255), -1)
                         targets.append((cx,cy))
+            
+            # 移动鼠标
             if targets and self.mouse_on:
                 tx, ty = targets[0]
                 sx, sy = int((tx/fw)*self.sw), int((ty/fh)*self.sh)
                 if self.lx: sx, sy = int(self.lx+(sx-self.lx)*0.3), int(self.ly+(sy-self.ly)*0.3)
                 pyautogui.moveTo(sx, sy)
                 self.lx, self.ly = sx, sy
+            
             cv2.imshow('Head Tracker', f)
             if not self.handle_key(cv2.waitKey(1)&0xFF): break
+        
         cap.release()
         cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    print("\n" + "="*40 + "\n   人头追踪工具 v5.0\n" + "="*40)
+    print("\n" + "="*40)
+ print("   人头追踪工具 v5.1")
+    print("="*40)
+    
     app = App()
+    
     print("\n检测模式: 1.人脸+人体 2.仅人脸 3.仅人体")
     try: m = input("选择(默认1): ").strip() or "1"
     except: m = "1"
     app.mode = {'1':'both','2':'face','3':'body'}.get(m,'both')
+    
     print("\n颜色: 1.关 2.红 3.黄 4.紫")
     try: c = input("选择(默认1): ").strip() or "1"
     except: c = "1"
     app.color = {'1':None,'2':'red','3':'yellow','4':'purple'}.get(c)
+    
     try: cam = int(input("摄像头索引(默认0): ").strip() or "0")
     except: cam = 0
+    
     try: app.run(cam)
     except KeyboardInterrupt: pass
